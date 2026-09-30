@@ -1,0 +1,7 @@
+broadcast_send
+udp_recv_check
+*.o
+tests/test_sched
+tests/test_config
+tests/test_payload
+/out/
