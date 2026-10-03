@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "payload.h"
@@ -15,6 +16,8 @@
 #include "sender.h"
 #include "stats.h"
 #include "timeutil.h"
+#include "text.h"
+#include "setup.h"
 
 #define EXIT_INPUT_ERROR 1
 #define EXIT_RUNTIME_ERROR 2
@@ -30,12 +33,15 @@ static void on_signal(int sig)
 
 static void usage(FILE *fp, const char *prog)
 {
-    fprintf(fp,
-            "使い方: %s --config FILE [--check-config] [--stats-file FILE]\n"
+    ui_fprintf(fp,
+            "使い方: %s [--config FILE] [--check-config] [--stats-file FILE]\n"
             "\n"
-            "  -c, --config FILE      コンフィグファイル（必須）\n"
+            "  -c, --config FILE      コンフィグファイル（省略時は対話入力）\n"
             "  -n, --check-config     設定とペイロードを静的に検証して終了する（送信しない）\n"
             "  -s, --stats-file FILE  [stats] file を上書き指定する（カレントディレクトリ基準）\n"
+            "  -i, --interactive     不足項目を順番に質問する（端末では既定）\n"
+            "      --non-interactive 質問せず、不足する必須項目をエラーにする\n"
+            "      --config-encoding auto|UTF-8|EUC-JP|SJIS（既定 auto）\n"
             "  -h, --help             このヘルプを表示する\n"
             "\n"
             "終了コード: 0=正常, 1=入力エラー, 2=実行時エラー\n",
@@ -51,27 +57,30 @@ static void print_config(const config_t *cfg, const payload_t *pl)
     double pps = (double)cfg->packets_per_cycle * 1e6 / (double)cfg->period_us;
     double bps = (double)pl->len * 8.0 * pps;
 
-    printf("=== 設定 ===\n");
-    printf("interface            : %s\n", cfg->interface);
-    printf("source               : %s:%u%s\n", src, cfg->source_port,
+    ui_printf("=== 設定 ===\n");
+    ui_printf("interface            : %s\n", cfg->interface);
+    ui_printf("source               : %s:%u%s\n", src, cfg->source_port,
            cfg->source_port == 0 ? " (auto)" : "");
-    printf("destination          : %s:%u\n", bc, cfg->destination_port);
-    printf("payload              : %s (%s, %zu bytes)\n", cfg->payload_path,
-           cfg->payload_format == PAYLOAD_HEX ? "hex" : "binary", pl->len);
-    printf("period_us            : %" PRIu64 "\n", cfg->period_us);
-    printf("packets_per_cycle    : %" PRIu64 "\n", cfg->packets_per_cycle);
-    printf("duration_sec         : %" PRIu64 "%s\n", cfg->duration_sec,
+    ui_printf("destination          : %s:%u\n", bc, cfg->destination_port);
+    if (cfg->payload_format == PAYLOAD_ZERO)
+        ui_printf("payload              : 0データ・全バイト0x00 (zero, %zu bytes)\n", pl->len);
+    else
+        ui_printf("payload              : %s (%s, %zu bytes)\n", text_display_path(cfg->payload_path),
+                  cfg->payload_format == PAYLOAD_HEX ? "hex" : "binary", pl->len);
+    ui_printf("period_us            : %" PRIu64 "\n", cfg->period_us);
+    ui_printf("packets_per_cycle    : %" PRIu64 "\n", cfg->packets_per_cycle);
+    ui_printf("duration_sec         : %" PRIu64 "%s\n", cfg->duration_sec,
            cfg->duration_sec == 0 ? " (無制限)" : "");
-    printf("max_attempts         : %" PRIu64 "%s\n", cfg->max_attempts,
+    ui_printf("max_attempts         : %" PRIu64 "%s\n", cfg->max_attempts,
            cfg->max_attempts == 0 ? " (無制限)" : "");
-    printf("stats.interval_sec   : %" PRIu64 "%s\n", cfg->stats_interval_sec,
+    ui_printf("stats.interval_sec   : %" PRIu64 "%s\n", cfg->stats_interval_sec,
            cfg->stats_interval_sec == 0 ? " (終了時のみ)" : "");
-    printf("stats.file           : %s\n", cfg->stats_path[0] ? cfg->stats_path : "(なし)");
-    printf("planned_pps          : %.1f\n", pps);
-    printf("planned_payload_Mbps : %.3f  (UDPデータ部のみ。ヘッダー・IP分割・フレーム間隔を含まない)\n",
+    ui_printf("stats.file           : %s\n", cfg->stats_path[0] ? text_display_path(cfg->stats_path) : "(なし)");
+    ui_printf("planned_pps          : %.1f\n", pps);
+    ui_printf("planned_payload_Mbps : %.3f  (UDPデータ部のみ。ヘッダー・IP分割・フレーム間隔を含まない)\n",
            bps / 1e6);
     if (bps > 1e9)
-        printf("注意: データ部だけで1Gbpsを超える設定です（過負荷試験として送信します）\n");
+        ui_printf("注意: データ部だけで1Gbpsを超える設定です（過負荷試験として送信します）\n");
     fflush(stdout);
 }
 
@@ -79,19 +88,19 @@ static void print_socket_info(const config_t *cfg, const sender_t *s, size_t pay
 {
     char local[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &s->local.sin_addr, local, sizeof(local));
-    printf("=== ソケット ===\n");
-    printf("ifindex              : %u\n", s->ifindex);
-    printf("bound                : %s:%u\n", local, ntohs(s->local.sin_port));
+    ui_printf("=== ソケット ===\n");
+    ui_printf("ifindex              : %u\n", s->ifindex);
+    ui_printf("bound                : %s:%u\n", local, ntohs(s->local.sin_port));
     if (s->mtu > 0) {
-        printf("mtu                  : %d\n", s->mtu);
+        ui_printf("mtu                  : %d\n", s->mtu);
         int max_unfrag = s->mtu - 28;
-        printf("ip_fragmentation     : %s (MTU内のUDPデータ部上限 %d bytes)\n",
+        ui_printf("ip_fragmentation     : %s (MTU内のUDPデータ部上限 %d bytes)\n",
                (long)payload_len > max_unfrag ? "あり" : "なし", max_unfrag);
     } else {
-        printf("mtu                  : 取得不可\n");
+        ui_printf("mtu                  : 取得不可\n");
     }
     if (s->sndbuf > 0)
-        printf("so_sndbuf            : %d\n", s->sndbuf);
+        ui_printf("so_sndbuf            : %d\n", s->sndbuf);
     (void)cfg;
     fflush(stdout);
 }
@@ -236,68 +245,118 @@ static int run(const config_t *cfg, sender_t *snd, size_t payload_len, stats_t *
 
 int main(int argc, char **argv)
 {
+    char err[1024];
+    if (text_init(err, sizeof(err)) < 0) {
+        fprintf(stderr, "%s\n", err); /* Initialization diagnostics are ASCII. */
+        return EXIT_INPUT_ERROR;
+    }
     const char *config_path = NULL;
     const char *stats_override = NULL;
+    const char *config_encoding = "auto";
     int check_only = 0;
+    int interactive = isatty(STDIN_FILENO);
 
     static const struct option opts[] = {
         { "config", required_argument, NULL, 'c' },
         { "check-config", no_argument, NULL, 'n' },
         { "stats-file", required_argument, NULL, 's' },
+        { "interactive", no_argument, NULL, 'i' },
+        { "non-interactive", no_argument, NULL, 1000 },
+        { "config-encoding", required_argument, NULL, 1001 },
         { "help", no_argument, NULL, 'h' },
         { NULL, 0, NULL, 0 },
     };
     int c;
-    while ((c = getopt_long(argc, argv, "c:ns:h", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "c:ns:ih", opts, NULL)) != -1) {
         switch (c) {
         case 'c': config_path = optarg; break;
         case 'n': check_only = 1; break;
         case 's': stats_override = optarg; break;
+        case 'i': interactive = 1; break;
+        case 1000: interactive = 0; break;
+        case 1001: config_encoding = optarg; break;
         case 'h': usage(stdout, argv[0]); return 0;
         default: usage(stderr, argv[0]); return EXIT_INPUT_ERROR;
         }
     }
-    if (optind != argc || config_path == NULL) {
+    if (optind != argc || (!interactive && config_path == NULL)) {
         usage(stderr, argv[0]);
         return EXIT_INPUT_ERROR;
     }
 
-    char err[1024];
-    config_t cfg;
-    if (config_load(config_path, &cfg, err, sizeof(err)) < 0) {
-        fprintf(stderr, "設定エラー: %s\n", err);
+    if (strcasecmp(config_encoding, "auto") && !text_encoding(config_encoding)) {
+        ui_fprintf(stderr, "--config-encoding: auto, UTF-8, EUC-JP, SJIS を指定してください\n");
         return EXIT_INPUT_ERROR;
+    }
+    config_t cfg;
+    config_init(&cfg);
+    int load_rc = config_path ? config_load_partial(config_path, config_encoding, &cfg, err, sizeof(err)) : 0;
+    if (load_rc < 0) {
+        /* Only a missing file starts an empty wizard; syntax/read errors stay errors. */
+        if (interactive && load_rc == -2) {
+            config_init(&cfg);
+            ui_fprintf(stderr, "設定ファイルがありません。必要な項目を順番に入力します。\n");
+        } else {
+            ui_fprintf(stderr, "設定エラー: %s\n", err);
+            return EXIT_INPUT_ERROR;
+        }
     }
     if (stats_override != NULL) {
         int n = snprintf(cfg.stats_path, sizeof(cfg.stats_path), "%s", stats_override);
         if (n < 0 || (size_t)n >= sizeof(cfg.stats_path)) {
-            fprintf(stderr, "設定エラー: --stats-file: パスが長すぎます\n");
+            ui_fprintf(stderr, "設定エラー: --stats-file: パスが長すぎます\n");
+            return EXIT_INPUT_ERROR;
+        }
+        cfg.present |= 1u << K_STATS_FILE;
+    }
+    if (!CONFIG_HAS(&cfg, K_INTERFACE) || !CONFIG_HAS(&cfg, K_SOURCE_IP) ||
+        !CONFIG_HAS(&cfg, K_BROADCAST_IP)) {
+        if (!interactive && !CONFIG_HAS(&cfg, K_INTERFACE)) {
+            ui_fprintf(stderr, "設定エラー: interface が未設定です。端末で起動するか --interactive を指定してください\n");
+            return EXIT_INPUT_ERROR;
+        }
+        nic_t *items = NULL;
+        size_t count = 0;
+        int rc = nic_discover(&items, &count, err, sizeof(err));
+        if (rc == 0) rc = setup_network(&cfg, items, count, interactive ? stdin : NULL,
+                                        stderr, err, sizeof(err));
+        free(items);
+        if (rc < 0) {
+            ui_fprintf(stderr, "設定エラー: %s\n", err);
             return EXIT_INPUT_ERROR;
         }
     }
+    if (interactive && setup_missing(&cfg, stdin, stderr, err, sizeof(err)) < 0) {
+        ui_fprintf(stderr, "設定エラー: %s\n", err);
+        return EXIT_INPUT_ERROR;
+    }
+    if (config_require(&cfg, config_path ? config_path : "対話入力", err, sizeof(err)) < 0) {
+        ui_fprintf(stderr, "設定エラー: %s（端末で起動するか --interactive を指定してください）\n", err);
+        return EXIT_INPUT_ERROR;
+    }
 
     payload_t pl;
-    if (payload_load(cfg.payload_path, cfg.payload_format, &pl, err, sizeof(err)) < 0) {
-        fprintf(stderr, "ペイロードエラー: %s\n", err);
+    if (payload_prepare(&cfg, &pl, err, sizeof(err)) < 0) {
+        ui_fprintf(stderr, "ペイロードエラー: %s\n", err);
         return EXIT_INPUT_ERROR;
     }
 
     print_config(&cfg, &pl);
     if (check_only) {
-        printf("設定とペイロードの静的検証: OK（NIC・アドレスの検証は通常起動時に行います）\n");
+        ui_printf("設定とペイロードの静的検証: OK（NIC・アドレスの検証は通常起動時に行います）\n");
         payload_free(&pl);
         return 0;
     }
 
     if (install_signals() < 0) {
-        fprintf(stderr, "sigaction: %s\n", strerror(errno));
+        ui_fprintf(stderr, "sigaction: %s\n", strerror(errno));
         payload_free(&pl);
         return EXIT_RUNTIME_ERROR;
     }
 
     sender_t snd;
     if (sender_open(&snd, &cfg, pl.data, pl.len, err, sizeof(err)) < 0) {
-        fprintf(stderr, "ネットワーク設定エラー: %s\n", err);
+        ui_fprintf(stderr, "ネットワーク設定エラー: %s\n", err);
         payload_free(&pl);
         return EXIT_INPUT_ERROR;
     }
@@ -306,7 +365,7 @@ int main(int argc, char **argv)
     stats_t st;
     stats_init(&st, cfg.packets_per_cycle, 0);
     if (cfg.stats_path[0] != '\0' && stats_open_csv(&st, cfg.stats_path, err, sizeof(err)) < 0) {
-        fprintf(stderr, "統計ファイルエラー: %s\n", err);
+        ui_fprintf(stderr, "統計ファイルエラー: %s\n", err);
         sender_close(&snd);
         payload_free(&pl);
         return EXIT_INPUT_ERROR;
@@ -315,7 +374,7 @@ int main(int argc, char **argv)
 
     char utc[64];
     format_utc_now(utc, sizeof(utc));
-    printf("=== 送信開始 ===\nstart_utc            : %s\n", utc);
+    ui_printf("=== 送信開始 ===\nstart_utc            : %s\n", utc);
     fflush(stdout);
 
     int64_t start = mono_now_ns();
@@ -329,7 +388,7 @@ int main(int argc, char **argv)
     sender_close(&snd);
     payload_free(&pl);
     if (rc < 0) {
-        fprintf(stderr, "送信を中止しました: %s\n", reason);
+        ui_fprintf(stderr, "送信を中止しました: %s\n", reason);
         return EXIT_RUNTIME_ERROR;
     }
     return 0;

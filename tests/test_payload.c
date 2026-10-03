@@ -26,6 +26,12 @@ static void test_hex_matches_binary(void)
     CHECK(memcmp(p.data, data, sizeof(data)) == 0);
     payload_free(&p);
 
+    write_text("bom.hex", "\xef\xbb\xbf" "00 01 FF\n", path, sizeof(path));
+    CHECK_EQ(payload_load(path, PAYLOAD_HEX, &p, err, sizeof(err)), 0);
+    CHECK_EQ(p.len, 3);
+    CHECK(p.data && p.len == 3 && !memcmp(p.data, "\x00\x01\xff", 3));
+    payload_free(&p);
+
     /* 区切りなしの連続表記も受け付ける */
     write_text("p2.hex", "0001FFabCDef10", path, sizeof(path));
     CHECK_EQ(payload_load(path, PAYLOAD_HEX, &p, err, sizeof(err)), 0);
@@ -60,6 +66,35 @@ static void test_empty_binary(void)
     write_file("empty.bin", "", 0, path, sizeof(path));
     CHECK_EQ(payload_load(path, PAYLOAD_BINARY, &p, err, sizeof(err)), -1);
     CHECK_CONTAINS(err, "データが空");
+}
+
+static void test_zero_payload(void)
+{
+    config_t cfg;
+    config_init(&cfg);
+    cfg.payload_format = PAYLOAD_ZERO;
+    /* A leftover path must never be opened in zero mode. */
+    strcpy(cfg.payload_path, "/nonexistent/payload.bin");
+    const size_t sizes[] = {1, 100, BCS_PAYLOAD_MAX};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        cfg.payload_size = sizes[i];
+        payload_t p;
+        CHECK_EQ(payload_prepare(&cfg, &p, err, sizeof(err)), 0);
+        CHECK_EQ(p.len, sizes[i]);
+        CHECK(p.data != NULL);
+        if (p.data) {
+            for (size_t j = 0; j < p.len; j++) CHECK_EQ(p.data[j], 0);
+        }
+        payload_free(&p);
+    }
+    const size_t invalid[] = {0, BCS_PAYLOAD_MAX + 1, SIZE_MAX};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        cfg.payload_size = invalid[i];
+        payload_t p;
+        CHECK_EQ(payload_prepare(&cfg, &p, err, sizeof(err)), -1);
+        CHECK(p.data == NULL);
+        CHECK_EQ(p.len, 0);
+    }
 }
 
 static void test_size_boundary(void)
@@ -118,6 +153,7 @@ int main(void)
     test_hex_matches_binary();
     test_hex_errors();
     test_empty_binary();
+    test_zero_payload();
     test_size_boundary();
     test_not_regular_file();
     remove_tmpdir();

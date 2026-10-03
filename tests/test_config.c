@@ -89,6 +89,27 @@ static void test_optional_defaults(void)
     CHECK_EQ(cfg.payload_format, PAYLOAD_BINARY);
 }
 
+static void test_zero_config(void)
+{
+    CHECK_EQ(load_replaced("format = hex\nfile = payload.hex\n", "format = zero\nsize = 100\n"), 0);
+    CHECK_EQ(cfg.payload_format, PAYLOAD_ZERO);
+    CHECK_EQ(cfg.payload_size, 100);
+    CHECK(!CONFIG_HAS(&cfg, K_PAYLOAD_FILE));
+    CHECK_EQ(load_replaced("format = hex\nfile = payload.hex\n", "size = 65507\nformat = zero\n"), 0);
+    CHECK_EQ(cfg.payload_size, 65507);
+    CHECK_EQ(load_replaced("format = hex\nfile = payload.hex\n", "format = zero\n"), -1);
+    CHECK_CONTAINS(err, "必須項目がありません: [payload] size");
+    CHECK_EQ(load_replaced("file = payload.hex\n", ""), -1);
+    CHECK_CONTAINS(err, "必須項目がありません: [payload] file");
+    const char *bad_values[] = {"0", "65508", "-1", "1.5", "abc", "18446744073709551616"};
+    for (size_t i = 0; i < sizeof(bad_values) / sizeof(bad_values[0]); i++) {
+        char replacement[128];
+        snprintf(replacement, sizeof(replacement), "format = zero\nsize = %s\n", bad_values[i]);
+        CHECK_EQ(load_replaced("format = hex\nfile = payload.hex\n", replacement), -1);
+        CHECK_CONTAINS(err, "size: 1〜65507");
+    }
+}
+
 static void expect_error(const char *line, const char *replace, const char *msg_part)
 {
     CHECK_EQ(load_replaced(line, replace), -1);
@@ -179,6 +200,7 @@ int main(void)
     make_tmpdir();
     test_valid();
     test_optional_defaults();
+    test_zero_config();
     test_errors();
     test_key_before_section();
     test_nul_in_line();

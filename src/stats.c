@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "stats.h"
+#include "text.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -39,14 +40,14 @@ int stats_open_csv(stats_t *st, const char *path, char *err, size_t errlen)
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (fd < 0) {
         if (errno == EEXIST)
-            snprintf(err, errlen, "%s: 既に存在します（上書きしません）", path);
+            snprintf(err, errlen, "%s: 既に存在します（上書きしません）", text_display_path(path));
         else
-            snprintf(err, errlen, "%s: 作成できません: %s", path, strerror(errno));
+            snprintf(err, errlen, "%s: 作成できません: %s", text_display_path(path), strerror(errno));
         return -1;
     }
     st->csv = fdopen(fd, "w");
     if (st->csv == NULL) {
-        snprintf(err, errlen, "%s: fdopen: %s", path, strerror(errno));
+        snprintf(err, errlen, "%s: fdopen: %s", text_display_path(path), strerror(errno));
         close(fd);
         return -1;
     }
@@ -169,7 +170,7 @@ static void write_row(stats_t *st, FILE *fp, const char *record, const counters_
 static void print_interval_line(stats_t *st, const counters_t *c, int64_t now_mono_ns, int64_t span_ns)
 {
     double span_s = (double)span_ns / 1e9;
-    printf("[%9.3fs] cycles=%" PRIu64 " skipped=%" PRIu64 " attempts=%" PRIu64 " ok=%" PRIu64
+    ui_printf("[%9.3fs] cycles=%" PRIu64 " skipped=%" PRIu64 " attempts=%" PRIu64 " ok=%" PRIu64
            " fail=%" PRIu64 " ok_pps=%.1f ok_Mbps(payload)=%.3f late_max_us=%.1f\n",
            (double)(now_mono_ns - st->start_mono_ns) / 1e9, c->cycles, c->skipped_cycles,
            c->attempts, c->ok, c->fail, span_s > 0 ? (double)c->ok / span_s : 0.0,
@@ -205,39 +206,39 @@ void stats_finish(stats_t *st, int64_t now_mono_ns, const char *reason)
 
     char utc[64];
     format_utc_now(utc, sizeof(utc));
-    printf("=== 送信結果 ===\n");
-    printf("end_utc              : %s\n", utc);
-    printf("end_reason           : %s\n", reason);
-    printf("elapsed_s            : %.6f\n", span_s);
-    printf("cycles_executed      : %" PRIu64 "\n", c->cycles);
-    printf("skipped_cycles       : %" PRIu64 "\n", c->skipped_cycles);
-    printf("skipped_packets      : %" PRIu64 "  (skipped_cycles x packets_per_cycle, 未送信相当)\n",
+    ui_printf("=== 送信結果 ===\n");
+    ui_printf("end_utc              : %s\n", utc);
+    ui_printf("end_reason           : %s\n", reason);
+    ui_printf("elapsed_s            : %.6f\n", span_s);
+    ui_printf("cycles_executed      : %" PRIu64 "\n", c->cycles);
+    ui_printf("skipped_cycles       : %" PRIu64 "\n", c->skipped_cycles);
+    ui_printf("skipped_packets      : %" PRIu64 "  (skipped_cycles x packets_per_cycle, 未送信相当)\n",
            c->skipped_cycles * st->packets_per_cycle);
-    printf("send_attempts        : %" PRIu64 "\n", c->attempts);
-    printf("send_ok (API accept) : %" PRIu64 "\n", c->ok);
-    printf("send_fail            : %" PRIu64 "\n", c->fail);
+    ui_printf("send_attempts        : %" PRIu64 "\n", c->attempts);
+    ui_printf("send_ok (API accept) : %" PRIu64 "\n", c->ok);
+    ui_printf("send_fail            : %" PRIu64 "\n", c->fail);
     for (int e = 1; e < STATS_ERRNO_MAX; e++) {
         if (c->fail_by_errno[e] == 0)
             continue;
         if (e == STATS_ERRNO_MAX - 1)
-            printf("  errno>=%d          : %" PRIu64 "\n", e, c->fail_by_errno[e]);
+            ui_printf("  errno>=%d          : %" PRIu64 "\n", e, c->fail_by_errno[e]);
         else
-            printf("  errno %3d %-10s : %" PRIu64 "  (%s)\n", e, errno_name(e), c->fail_by_errno[e],
+            ui_printf("  errno %3d %-10s : %" PRIu64 "  (%s)\n", e, errno_name(e), c->fail_by_errno[e],
                    strerror(e));
     }
-    printf("ok_payload_bytes     : %" PRIu64 "\n", c->ok_bytes);
+    ui_printf("ok_payload_bytes     : %" PRIu64 "\n", c->ok_bytes);
     if (span_s > 0) {
-        printf("ok_pps (avg)         : %.1f\n", (double)c->ok / span_s);
-        printf("ok_payload_Mbps (avg): %.3f\n", (double)c->ok_bytes * 8.0 / span_s / 1e6);
+        ui_printf("ok_pps (avg)         : %.1f\n", (double)c->ok / span_s);
+        ui_printf("ok_payload_Mbps (avg): %.3f\n", (double)c->ok_bytes * 8.0 / span_s / 1e6);
     }
     if (c->cycles > 0) {
-        printf("late_avg_us          : %.3f\n", us((int64_t)(c->late_sum_ns / c->cycles)));
-        printf("late_max_us          : %.3f\n", us(c->late_max_ns));
-        printf("burst_max_us         : %.3f\n", us(c->burst_max_ns));
+        ui_printf("late_avg_us          : %.3f\n", us((int64_t)(c->late_sum_ns / c->cycles)));
+        ui_printf("late_max_us          : %.3f\n", us(c->late_max_ns));
+        ui_printf("burst_max_us         : %.3f\n", us(c->burst_max_ns));
     }
     if (c->gap_count > 0) {
-        printf("cycle_gap_min_us     : %.3f\n", us(c->gap_min_ns));
-        printf("cycle_gap_max_us     : %.3f\n", us(c->gap_max_ns));
+        ui_printf("cycle_gap_min_us     : %.3f\n", us(c->gap_min_ns));
+        ui_printf("cycle_gap_max_us     : %.3f\n", us(c->gap_max_ns));
     }
     fflush(stdout);
 }

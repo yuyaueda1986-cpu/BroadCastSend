@@ -1,11 +1,13 @@
 #define _GNU_SOURCE
 #include "sender.h"
+#include "setup.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <stdio.h>
+#include "text.h"
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -20,6 +22,7 @@ static int check_interface(sender_t *s, const config_t *cfg, char *err, size_t e
 
     int found_if = 0, found_addr = 0, rc = -1;
     unsigned flags = 0;
+    const struct ifaddrs *selected = NULL;
     char src[INET_ADDRSTRLEN], bc[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &cfg->source_ip, src, sizeof(src));
     inet_ntop(AF_INET, &cfg->broadcast_ip, bc, sizeof(bc));
@@ -35,6 +38,7 @@ static int check_interface(sender_t *s, const config_t *cfg, char *err, size_t e
         if (a->sin_addr.s_addr != cfg->source_ip.s_addr)
             continue;
         found_addr = 1;
+        selected = ifa;
         if (ifa->ifa_netmask != NULL)
             s->netmask = ((const struct sockaddr_in *)ifa->ifa_netmask)->sin_addr;
         break;
@@ -58,13 +62,17 @@ static int check_interface(sender_t *s, const config_t *cfg, char *err, size_t e
         goto out;
     }
     if (!(flags & IFF_RUNNING))
-        fprintf(stderr, "警告: インターフェース'%s'がRUNNING状態ではありません（リンクダウンの可能性）\n",
+        ui_fprintf(stderr, "警告: インターフェース'%s'がRUNNING状態ではありません（リンクダウンの可能性）\n",
                 cfg->interface);
 
-    uint32_t expected = cfg->source_ip.s_addr | ~s->netmask.s_addr;
-    if (expected != cfg->broadcast_ip.s_addr || s->netmask.s_addr == 0xffffffffu) {
+    nic_t nic;
+    if (!selected || !nic_from_ifaddr(selected, &nic)) {
+        snprintf(err, errlen, "インターフェース'%s'のIPv4には送信可能なブロードキャストアドレスがありません", cfg->interface);
+        goto out;
+    }
+    if (nic.broadcast.s_addr != cfg->broadcast_ip.s_addr) {
         char exp[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
-        struct in_addr e = { .s_addr = expected };
+        struct in_addr e = nic.broadcast;
         inet_ntop(AF_INET, &e, exp, sizeof(exp));
         inet_ntop(AF_INET, &s->netmask, mask, sizeof(mask));
         snprintf(err, errlen, "broadcast_ip %s が %s/%s のブロードキャストアドレス %s と一致しません",

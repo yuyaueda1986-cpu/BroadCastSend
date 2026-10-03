@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "config.h"
+#include "payload.h"
+#include "text.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -13,14 +15,6 @@
 #define LINE_MAX_LEN 4096
 
 typedef enum { SEC_NONE, SEC_NETWORK, SEC_PAYLOAD, SEC_SEND, SEC_STATS } section_t;
-
-typedef enum {
-    K_INTERFACE, K_SOURCE_IP, K_SOURCE_PORT, K_BROADCAST_IP, K_DESTINATION_PORT,
-    K_FORMAT, K_PAYLOAD_FILE,
-    K_PERIOD_US, K_PACKETS_PER_CYCLE, K_DURATION_SEC, K_MAX_ATTEMPTS,
-    K_STATS_INTERVAL_SEC, K_STATS_FILE,
-    K_COUNT
-} key_id_t;
 
 typedef struct {
     section_t section;
@@ -37,6 +31,7 @@ static const key_def_t KEYS[K_COUNT] = {
     [K_DESTINATION_PORT]   = { SEC_NETWORK, "network", "destination_port", 1 },
     [K_FORMAT]             = { SEC_PAYLOAD, "payload", "format", 1 },
     [K_PAYLOAD_FILE]       = { SEC_PAYLOAD, "payload", "file", 1 },
+    [K_PAYLOAD_SIZE]       = { SEC_PAYLOAD, "payload", "size", 0 },
     [K_PERIOD_US]          = { SEC_SEND, "send", "period_us", 1 },
     [K_PACKETS_PER_CYCLE]  = { SEC_SEND, "send", "packets_per_cycle", 1 },
     [K_DURATION_SEC]       = { SEC_SEND, "send", "duration_sec", 0 },
@@ -53,9 +48,9 @@ static void set_err(char *err, size_t errlen, const char *path, int line, const 
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
     if (line > 0)
-        snprintf(err, errlen, "%s:%d: %s", path, line, msg);
+        snprintf(err, errlen, "%s:%d: %s", text_display_path(path), line, msg);
     else
-        snprintf(err, errlen, "%s: %s", path, msg);
+        snprintf(err, errlen, "%s: %s", text_display_path(path), msg);
 }
 
 static char *trim(char *s)
@@ -122,6 +117,7 @@ static int apply_value(key_id_t id, const char *val, const char *cfg_path, confi
                        char *msg, size_t msglen)
 {
     uint64_t u;
+    char native[PATH_MAX];
     switch (id) {
     case K_INTERFACE:
         if (strlen(val) >= IF_NAMESIZE) {
@@ -161,16 +157,26 @@ static int apply_value(key_id_t id, const char *val, const char *cfg_path, confi
             cfg->payload_format = PAYLOAD_BINARY;
         else if (strcmp(val, "hex") == 0)
             cfg->payload_format = PAYLOAD_HEX;
+        else if (strcmp(val, "zero") == 0)
+            cfg->payload_format = PAYLOAD_ZERO;
         else {
-            snprintf(msg, msglen, "format: 'binary'または'hex'を指定してください: '%s'", val);
+            snprintf(msg, msglen, "format: 'zero'（0データ）、'binary'または'hex'を指定してください: '%s'", val);
             return -1;
         }
         return 0;
     case K_PAYLOAD_FILE:
-        if (resolve_relative(cfg_path, val, cfg->payload_path, sizeof(cfg->payload_path)) < 0) {
-            snprintf(msg, msglen, "file: パスが長すぎます");
+        if (text_native_path(val, native, sizeof(native)) < 0 ||
+            resolve_relative(cfg_path, native, cfg->payload_path, sizeof(cfg->payload_path)) < 0) {
+            snprintf(msg, msglen, "file: パスが長すぎるか、ファイル名の文字コードへ変換できません");
             return -1;
         }
+        return 0;
+    case K_PAYLOAD_SIZE:
+        if (parse_u64(val, 1, BCS_PAYLOAD_MAX, &u) < 0) {
+            snprintf(msg, msglen, "size: 1〜%uの整数（バイト数）を指定してください: '%s'", BCS_PAYLOAD_MAX, val);
+            return -1;
+        }
+        cfg->payload_size = (size_t)u;
         return 0;
     case K_PERIOD_US:
         if (parse_u64(val, BCS_PERIOD_US_MIN, BCS_PERIOD_US_MAX, &cfg->period_us) < 0) {
@@ -207,8 +213,9 @@ static int apply_value(key_id_t id, const char *val, const char *cfg_path, confi
         }
         return 0;
     case K_STATS_FILE:
-        if (resolve_relative(cfg_path, val, cfg->stats_path, sizeof(cfg->stats_path)) < 0) {
-            snprintf(msg, msglen, "file: パスが長すぎます");
+        if (text_native_path(val, native, sizeof(native)) < 0 ||
+            resolve_relative(cfg_path, native, cfg->stats_path, sizeof(cfg->stats_path)) < 0) {
+            snprintf(msg, msglen, "file: パスが長すぎるか、ファイル名の文字コードへ変換できません");
             return -1;
         }
         return 0;
@@ -218,20 +225,38 @@ static int apply_value(key_id_t id, const char *val, const char *cfg_path, confi
     }
 }
 
-int config_load(const char *path, config_t *cfg, char *err, size_t errlen)
+void config_init(config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->stats_interval_sec = 1;
+}
+
+const char *config_key_name(key_id_t key) { return KEYS[key].name; }
+
+int config_set(config_t *cfg, key_id_t key, const char *val, const char *base,
+               char *err, size_t errlen)
+{
+    if (apply_value(key, val, base, cfg, err, errlen) < 0) return -1;
+    cfg->present |= 1u << key;
+    return 0;
+}
+
+static int load(const char *path, const char *encoding, int partial,
+                config_t *cfg, char *err, size_t errlen)
+{
+    config_init(cfg);
 
     FILE *fp = fopen(path, "r");
     if (fp == NULL) {
+        int missing = errno == ENOENT;
         set_err(err, errlen, path, 0, "開けません: %s", strerror(errno));
-        return -1;
+        return partial && missing ? -2 : -1;
     }
 
     int seen_line[K_COUNT] = {0};
     section_t sec = SEC_NONE;
     char *buf = NULL;
+    char *decoded = NULL;
     size_t cap = 0;
     ssize_t nread;
     int lineno = 0;
@@ -248,9 +273,21 @@ int config_load(const char *path, config_t *cfg, char *err, size_t errlen)
             set_err(err, errlen, path, lineno, "NUL文字を含んでいます");
             goto out;
         }
-        char *line = trim(buf);
+        char *raw = buf;
+        if (lineno == 1 && (size_t)nread >= 3 && !memcmp(raw, "\xef\xbb\xbf", 3))
+            raw += 3;
+        char *line = trim(raw);
         if (*line == '\0' || *line == '#' || *line == ';')
             continue;
+
+        free(decoded);
+        decoded = NULL;
+        char decode_err[256];
+        if (text_decode(line, encoding, &decoded, decode_err, sizeof(decode_err)) < 0) {
+            set_err(err, errlen, path, lineno, "%s", decode_err);
+            goto out;
+        }
+        line = decoded;
 
         if (*line == '[') {
             char *close = strchr(line, ']');
@@ -303,12 +340,13 @@ int config_load(const char *path, config_t *cfg, char *err, size_t errlen)
         }
         seen_line[id] = lineno;
         if (*val == '\0') {
+            if (partial) continue;
             set_err(err, errlen, path, lineno, "値が空です: '%s'", key);
             goto out;
         }
 
         char msg[400];
-        if (apply_value((key_id_t)id, val, path, cfg, msg, sizeof(msg)) < 0) {
+        if (config_set(cfg, (key_id_t)id, val, path, msg, sizeof(msg)) < 0) {
             set_err(err, errlen, path, lineno, "%s", msg);
             goto out;
         }
@@ -318,16 +356,36 @@ int config_load(const char *path, config_t *cfg, char *err, size_t errlen)
         goto out;
     }
 
-    for (int i = 0; i < K_COUNT; i++) {
-        if (KEYS[i].required && !seen_line[i]) {
-            set_err(err, errlen, path, 0, "必須項目がありません: [%s] %s",
-                    KEYS[i].section_name, KEYS[i].name);
-            goto out;
-        }
-    }
-    rc = 0;
+    rc = partial ? 0 : config_require(cfg, path, err, errlen);
 out:
+    free(decoded);
     free(buf);
     fclose(fp);
     return rc;
+}
+
+int config_require(const config_t *cfg, const char *path, char *err, size_t errlen)
+{
+    for (int i = 0; i < K_COUNT; i++) {
+        int required = KEYS[i].required;
+        if (i == K_PAYLOAD_FILE) required = cfg->payload_format != PAYLOAD_ZERO;
+        if (i == K_PAYLOAD_SIZE) required = cfg->payload_format == PAYLOAD_ZERO;
+        if (required && !CONFIG_HAS(cfg, i)) {
+            set_err(err, errlen, path, 0, "必須項目がありません: [%s] %s",
+                    KEYS[i].section_name, KEYS[i].name);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int config_load(const char *path, config_t *cfg, char *err, size_t errlen)
+{
+    return load(path, "auto", 0, cfg, err, errlen);
+}
+
+int config_load_partial(const char *path, const char *encoding, config_t *cfg,
+                        char *err, size_t errlen)
+{
+    return load(path, encoding, 1, cfg, err, errlen);
 }

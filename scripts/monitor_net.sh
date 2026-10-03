@@ -23,7 +23,18 @@ export LC_ALL=C
 export S_TIME_FORMAT=ISO
 
 usage() {
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    # ASCII terminal messages work with UTF-8, EUC-JP and SJIS terminals.
+    cat <<'HELP'
+Usage: monitor_net.sh -i IFACE [-o OUTDIR] [-t SECONDS] [-d SECONDS] [-p PORT]
+  -i IFACE    Network interface to monitor (required)
+  -o OUTDIR   Output directory (must be empty or new)
+  -t SECONDS  Sample interval (default: 1)
+  -d SECONDS  Duration (default: 0 = until Ctrl+C)
+  -p PORT     UDP port filter (1-65535)
+  -h          Show this help
+Files: meta.txt, iface.csv, udpip.csv, ethtool.csv, raw/, events.log
+Saved text uses UTF-8; CSV numeric fields use the C locale.
+HELP
     exit "${1:-1}"
 }
 
@@ -46,20 +57,20 @@ while getopts "i:o:t:d:p:h" opt; do
 done
 shift $((OPTIND - 1))
 [ $# -eq 0 ] || usage 1
-[ -n "$IFACE" ] || { echo "エラー: -i IFACE を指定してください" >&2; usage 1; }
-[[ "$INTERVAL" =~ ^[1-9][0-9]*$ ]] || { echo "エラー: -t は1以上の整数（秒）" >&2; exit 1; }
-[[ "$DURATION" =~ ^[0-9]+$ ]] || { echo "エラー: -d は0以上の整数（秒）" >&2; exit 1; }
+[ -n "$IFACE" ] || { echo "Error: specify -i IFACE" >&2; usage 1; }
+[[ "$INTERVAL" =~ ^[1-9][0-9]*$ ]] || { echo "Error: -t must be an integer >= 1 (seconds)" >&2; exit 1; }
+[[ "$DURATION" =~ ^[0-9]+$ ]] || { echo "Error: -d must be an integer >= 0 (seconds)" >&2; exit 1; }
 if [ -n "$PORT" ] && ! [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1 && "$PORT" -le 65535 ]]; then
-    echo "エラー: -p は1〜65535" >&2; exit 1
+    echo "Error: -p must be 1-65535" >&2; exit 1
 fi
-[ -d "/sys/class/net/$IFACE" ] || { echo "エラー: インターフェース'$IFACE'がありません" >&2; exit 1; }
+[ -d "/sys/class/net/$IFACE" ] || { echo "Error: interface '$IFACE' does not exist" >&2; exit 1; }
 
 HOST=$(hostname)
 if [ -z "$OUTDIR" ]; then
     OUTDIR="monitor_${HOST}_${IFACE}_$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 if [ -e "$OUTDIR" ] && [ -n "$(ls -A "$OUTDIR" 2>/dev/null)" ]; then
-    echo "エラー: 出力先'$OUTDIR'が空ではありません（上書きしません）" >&2
+    echo "Error: output directory '$OUTDIR' is not empty; refusing to overwrite" >&2
     exit 1
 fi
 mkdir -p "$OUTDIR/raw" || exit 1
@@ -239,7 +250,7 @@ STOP=0
 trap 'STOP=1' INT TERM
 
 log_event "start host=$HOST iface=$IFACE interval=${INTERVAL}s duration=${DURATION}s"
-echo "観測開始: $OUTDIR（Ctrl+Cで終了）" >&2
+echo "Monitoring: $OUTDIR (Ctrl+C to stop)" >&2
 
 START_NS=$(date +%s%N)
 N=0
@@ -274,4 +285,4 @@ for p in "${BG_PIDS[@]}"; do kill -INT "$p" 2>/dev/null; done
 wait 2>/dev/null
 log_event "stop samples=$N"
 echo "end_utc: $(utc_now)" >> "$OUTDIR/meta.txt"
-echo "観測終了: $OUTDIR" >&2
+echo "Monitoring finished: $OUTDIR" >&2

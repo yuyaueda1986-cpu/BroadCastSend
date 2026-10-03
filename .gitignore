@@ -4,4 +4,6 @@ udp_recv_check
 tests/test_sched
 tests/test_config
 tests/test_payload
+tests/test_setup
+tests/test_text
 /out/

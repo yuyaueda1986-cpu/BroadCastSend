@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include "text.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -24,7 +25,7 @@ static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
 static void usage(FILE *fp, const char *prog)
 {
-    fprintf(fp,
+    ui_fprintf(fp,
             "使い方: %s --port PORT --payload FILE --format hex|binary\n"
             "          [--bind ADDR] [--count N] [--idle-timeout SEC] [--rcvbuf BYTES]\n"
             "\n"
@@ -37,6 +38,11 @@ static void usage(FILE *fp, const char *prog)
 
 int main(int argc, char **argv)
 {
+    char init_err[256];
+    if (text_init(init_err, sizeof(init_err)) < 0) {
+        fprintf(stderr, "%s\n", init_err);
+        return 1;
+    }
     long port = -1, idle = 0, rcvbuf = 0;
     unsigned long long count = 0;
     const char *payload_path = NULL, *fmt = NULL, *bind_addr = "0.0.0.0";
@@ -76,7 +82,7 @@ int main(int argc, char **argv)
     payload_t pl;
     if (payload_load(payload_path, strcmp(fmt, "hex") == 0 ? PAYLOAD_HEX : PAYLOAD_BINARY, &pl,
                      err, sizeof(err)) < 0) {
-        fprintf(stderr, "ペイロードエラー: %s\n", err);
+        ui_fprintf(stderr, "ペイロードエラー: %s\n", err);
         return 1;
     }
 
@@ -93,7 +99,7 @@ int main(int argc, char **argv)
 
     struct sockaddr_in local = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (inet_pton(AF_INET, bind_addr, &local.sin_addr) != 1) {
-        fprintf(stderr, "--bind: IPv4アドレスではありません: %s\n", bind_addr);
+        ui_fprintf(stderr, "--bind: IPv4アドレスではありません: %s\n", bind_addr);
         return 1;
     }
     if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
@@ -107,7 +113,7 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    printf("listening %s:%ld, expected %zu bytes\n", bind_addr, port, pl.len);
+    ui_printf("listening %s:%ld, expected %zu bytes\n", bind_addr, port, pl.len);
     fflush(stdout);
 
     static uint8_t buf[65536];
@@ -160,7 +166,7 @@ int main(int argc, char **argv)
                     ifindex = pi->ipi_ifindex;
                 }
             }
-            printf("first datagram: from %s:%u to %s:%ld ifindex=%d size=%zd\n", src,
+            ui_printf("first datagram: from %s:%u to %s:%ld ifindex=%d size=%zd\n", src,
                    ntohs(from.sin_port), dst, port, ifindex, n);
             fflush(stdout);
             reported_first = 1;
@@ -174,7 +180,7 @@ int main(int argc, char **argv)
             match++;
     }
 
-    printf("received=%" PRIu64 " match=%" PRIu64 " size_mismatch=%" PRIu64
+    ui_printf("received=%" PRIu64 " match=%" PRIu64 " size_mismatch=%" PRIu64
            " content_mismatch=%" PRIu64 " truncated=%" PRIu64 "\n",
            received, match, size_mismatch, content_mismatch, truncated);
     close(fd);
